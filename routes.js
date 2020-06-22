@@ -1,14 +1,17 @@
-const { _, bcrypt, mongoClient, mongoUrl, dbName, shortId, jwt, __ } = require('./initiations');
+const { _, bcrypt, mongoClient, mongoUrl, dbName, jwt, __ } = require('./initiations');
 const { transporter, activateOptions, forgotOptions } = require('./nodemail');
-const tokenAuth = require('./middleware');
+const { tokenAuth } = require('./middleware');
+const shortid = require('shortid');
+const objectId = require('mongodb').ObjectID;
+const shortId = require('shortid');
 module.exports = function(app) {
 	app.post('/api/register', (req, res) => {
 		mongoClient.connect(mongoUrl, async (err, client) => {
 			if (err) res.json({ status: 'failed', msg: err });
 			const db = client.db(dbName);
 			const collection = db.collection('users');
-			const emailcheck = collection.findOne({ email: req.body.email });
-			const namecheck = collection.findOne({ username: req.body.username });
+			const emailcheck = await collection.findOne({ email: req.body.email });
+			const namecheck = await collection.findOne({ username: req.body.username });
 			if (!emailcheck)
 				if (!namecheck)
 					bcrypt.hash(req.body.password, 10, async function(err, hash) {
@@ -21,10 +24,11 @@ module.exports = function(app) {
 							activated: false
 						});
 						const data = await collection.findOne({ email: req.body.email });
-						client.close();
 						await transporter.sendMail(activateOptions(req.body.email, data['_id']), (err, info) => {
-							if (err) res.json({ msg: 'Unable to send email' });
-							else res.status(201).json({ msg: 'successfully added and activation mail sent' });
+							if (err) {
+								collection.remove({ _id: data['_id'] });
+								res.json({ msg: 'Unable to send email', err });
+							} else res.status(201).json({ msg: 'successfully added and activation mail sent' });
 						});
 					});
 				else {
@@ -70,19 +74,24 @@ module.exports = function(app) {
 	});
 
 	app.get('/api/activate/:id', (req, res) => {
+		console.log(req.params.id);
 		mongoClient.connect(mongoUrl, async (err, client) => {
 			if (err) res.status(502).json({ msg: 'refresh and try again' });
 			const db = client.db(dbName);
 			const collection = db.collection('users');
-			const data = await collection.findOne({ _id: req.params.id });
+			const data = await collection.findOne({ _id: new objectId(req.params.id) });
 			if (data)
-				collection.updateOne({ _id: req.params.id }, { $set: { activated: true } }, (err, result) => {
-					if (err) {
-						client.close();
-						res.status(501).json({ msg: 'unable to activate account' });
+				collection.updateOne(
+					{ _id: new objectId(req.params.id) },
+					{ $set: { activated: true } },
+					(err, result) => {
+						if (err) {
+							client.close();
+							res.status(501).json({ msg: 'unable to activate account' });
+						}
+						res.status(200).json({ msg: 'account successfully activated' });
 					}
-					res.status(200).json({ msg: 'account successfully activated' });
-				});
+				);
 			else {
 				client.close();
 
@@ -99,8 +108,8 @@ module.exports = function(app) {
 			if (data) {
 				client.close();
 				await transporter.sendMail(forgotOptions(req.body.email, data['_id']), (err, info) => {
-					if (err) res.json({ msg: 'Unable to send email' });
-					else res.status(201).json({ msg: 'check your mail  to change password' });
+					if (err) res.status(501).json({ msg: 'Unable to send email' });
+					else res.status(201).json({ msg: 'change password' });
 				});
 			} else {
 				client.close();
@@ -114,19 +123,23 @@ module.exports = function(app) {
 			if (err) res.status(502).json({ msg: 'refresh and try again' });
 			const db = client.db(dbName);
 			const collection = db.collection('users');
-			const data = await collection.findOne({ _id: req.body.id });
+			const data = await collection.findOne({ _id: new objectId(req.body.id) });
 			if (data) {
 				bcrypt.hash(req.body.password, 10, async function(err, hash) {
 					if (err) res.status(501).json({ status: 'failed', msg: err });
-					collection.updateOne({ _id: req.body.id }, { $set: { password: hash } }, (err, result) => {
-						client.close();
-						if (err) res.status(501).json({ msg: 'unable to update account' });
-						res.status(200).json({ msg: 'password successfully updated' });
-					});
+					collection.updateOne(
+						{ _id: new objectId(req.body.id) },
+						{ $set: { password: hash } },
+						(err, result) => {
+							client.close();
+							if (err) res.status(501).json({ msg: 'unable to update account' });
+							res.status(200).json({ msg: 'password successfully updated' });
+						}
+					);
 				});
 			} else {
 				client.close();
-				res.status(401).json({ msg: 'no such email is found' });
+				res.status(401).json({ msg: 'no such id is found' });
 			}
 		});
 	});
@@ -143,12 +156,14 @@ module.exports = function(app) {
 				collection.updateOne(
 					{ username: req.username },
 					{ $push: { urls: { fullurl, shorturl } } },
-					(err, result) => {
+					async (err, result) => {
 						if (err) {
 							client.close();
 							res.status(501).json({ msg: 'please reenter the url by refreshing the page' });
 						}
-						res.json({ msg: 'successfully generated' });
+						const matter = await collection.findOne({ username: req.username });
+						client.close();
+						res.json({ msg: 'successfully generated', data: matter.urls });
 					}
 				);
 			} else {
@@ -166,7 +181,7 @@ module.exports = function(app) {
 			const data = await collection.findOne({ username: req.username });
 			client.close();
 			if (data) res.json({ data: data.urls });
-			else res.json({ msg: 'Enter a big Url' });
+			else res.status(404).json({ msg: 'Enter a big Url' });
 		});
 	});
 
@@ -178,6 +193,25 @@ module.exports = function(app) {
 			const data = await collection.find({}).toArray();
 			client.close();
 			res.json({ data });
+		});
+	});
+
+	app.get('/go/:id', (req, res) => {
+		mongoClient.connect(mongoUrl, async (err, client) => {
+			if (err) res.status(502).json({ msg: 'refresh and try again' });
+			const db = client.db(dbName);
+			const collection = db.collection('users');
+			const data = await collection.findOne({ urls: { $elemMatch: { shorturl: req.params.id } } });
+			console.log(data);
+			if (!data)
+				res.status(404).send(
+					`<div style="width:100vw;text-align:center">
+						<h1 style="font-size:4vw ; color:red">404 page not found</h1>
+					</div>`
+				);
+			const url = data.urls.find((v) => v.shorturl == req.params.id).fullurl;
+			client.close();
+			res.redirect(url);
 		});
 	});
 };
