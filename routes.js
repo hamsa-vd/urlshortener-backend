@@ -74,7 +74,6 @@ module.exports = function(app) {
 	});
 
 	app.get('/api/activate/:id', (req, res) => {
-		console.log(req.params.id);
 		mongoClient.connect(mongoUrl, async (err, client) => {
 			if (err) res.status(502).json({ msg: 'refresh and try again' });
 			const db = client.db(dbName);
@@ -202,7 +201,6 @@ module.exports = function(app) {
 			const db = client.db(dbName);
 			const collection = db.collection('users');
 			const data = await collection.findOne({ urls: { $elemMatch: { shorturl: req.params.id } } });
-			console.log(data);
 			if (!data)
 				res.status(404).send(
 					`<div style="width:100vw;text-align:center">
